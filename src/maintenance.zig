@@ -136,13 +136,16 @@ pub fn mark_install_live(allocator: std.mem.Allocator, install_dir: []const u8) 
     if (builtin.os.tag == .windows) return;
 
     const live_path = std.fs.path.join(allocator, &[_][]const u8{ install_dir, live_dir_name }) catch return;
+    defer allocator.free(live_path);
     std.fs.cwd().makePath(live_path) catch return;
 
     // Prune dead siblings while we're here so the dir can't grow unboundedly.
     _ = install_in_use(allocator, install_dir);
 
     const pid_name = std.fmt.allocPrint(allocator, "{d}", .{current_pid()}) catch return;
+    defer allocator.free(pid_name);
     const pid_path = std.fs.path.join(allocator, &[_][]const u8{ live_path, pid_name }) catch return;
+    defer allocator.free(pid_path);
     const pid_file = std.fs.createFileAbsolute(pid_path, .{}) catch return;
     pid_file.close();
 }
@@ -155,6 +158,7 @@ fn install_in_use(allocator: std.mem.Allocator, install_path: []const u8) bool {
     if (builtin.os.tag == .windows) return false;
 
     const live_path = std.fs.path.join(allocator, &[_][]const u8{ install_path, live_dir_name }) catch return false;
+    defer allocator.free(live_path);
     var live_dir = std.fs.openDirAbsolute(live_path, .{ .access_sub_paths = true, .iterate = true }) catch return false;
     defer live_dir.close();
 
