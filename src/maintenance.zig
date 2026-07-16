@@ -14,6 +14,15 @@ const MetaStruct = metadata.MetaStruct;
 // never deletes a payload out from under a still-running older process.
 pub const live_dir_name = ".burrito_live";
 
+// File (inside the current version's install dir, next to .burrito_live)
+// listing the older versions whose skipped-cleanup notice has already been
+// announced, one version per line. A machine where a long-lived process
+// holds an older payload would otherwise re-print the notice on EVERY
+// launch of the newer binary; the marker keeps it to one announcement per
+// installed version (a new version extracts to a fresh install dir, so it
+// announces once again).
+pub const announced_skips_file_name = ".burrito_announced_skips";
+
 pub fn do_maint(args: [][:0]u8, install_dir: []const u8) !void {
     var stdout_buf: [64]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
@@ -118,7 +127,14 @@ pub fn do_clean_old_versions(install_prefix_path: []const u8, current_install_pa
                 // deleting it makes that process crash later with a `nofile`
                 // module-load kernel panic the first time it lazily loads a module.
                 if (install_in_use(allocator, other_install.?.install_dir_path)) {
-                    logger.log_stderr("Skipped cleanup of older version (v{s}): still in use by a running process", .{other_install.?.metadata.app_version});
+                    // Announce the skip once per installed version, not on
+                    // every launch: the notice is stderr chatter, and a fleet
+                    // that keeps an older payload in use for days would see
+                    // it on every single invocation otherwise.
+                    if (!skip_already_announced(allocator, current_install_path, other_install.?.metadata.app_version)) {
+                        logger.log_stderr("Skipped cleanup of older version (v{s}): still in use by a running process", .{other_install.?.metadata.app_version});
+                        record_skip_announced(allocator, current_install_path, other_install.?.metadata.app_version);
+                    }
                     continue;
                 }
                 try std.fs.deleteTreeAbsolute(other_install.?.install_dir_path);
@@ -174,6 +190,40 @@ fn install_in_use(allocator: std.mem.Allocator, install_path: []const u8) bool {
         }
     }
     return in_use;
+}
+
+// True if the skipped-cleanup notice for `version_str` was already announced
+// by this install (recorded in <current_install_path>/.burrito_announced_skips).
+// Best-effort: any read failure reports not-announced, which at worst repeats
+// the notice (the pre-marker behavior).
+fn skip_already_announced(allocator: std.mem.Allocator, current_install_path: []const u8, version_str: []const u8) bool {
+    const marker_path = std.fs.path.join(allocator, &[_][]const u8{ current_install_path, announced_skips_file_name }) catch return false;
+    defer allocator.free(marker_path);
+    const marker_file = std.fs.openFileAbsolute(marker_path, .{}) catch return false;
+    defer marker_file.close();
+    const content = marker_file.readToEndAlloc(allocator, 64 * 1024) catch return false;
+    defer allocator.free(content);
+
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.eql(u8, std.mem.trim(u8, line, " \r"), version_str)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Append `version_str` to the announced-skips marker so subsequent launches
+// of this install stay silent about it. Best-effort: failures must never
+// block a launch.
+fn record_skip_announced(allocator: std.mem.Allocator, current_install_path: []const u8, version_str: []const u8) void {
+    const marker_path = std.fs.path.join(allocator, &[_][]const u8{ current_install_path, announced_skips_file_name }) catch return;
+    defer allocator.free(marker_path);
+    const marker_file = std.fs.createFileAbsolute(marker_path, .{ .truncate = false }) catch return;
+    defer marker_file.close();
+    marker_file.seekFromEnd(0) catch return;
+    marker_file.writeAll(version_str) catch return;
+    marker_file.writeAll("\n") catch return;
 }
 
 fn pid_is_alive(pid: std.posix.pid_t) bool {
@@ -239,4 +289,35 @@ test "install_in_use: live pidfile blocks cleanup, stale pidfile is pruned" {
     defer allocator.free(junk_name);
     (try tmp.dir.createFile(junk_name, .{})).close();
     try std.testing.expect(!install_in_use(allocator, install_path));
+}
+
+test "announced skips: notice is recorded once per version, per install" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const allocator = std.testing.allocator;
+
+    const install_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(install_path);
+
+    // Nothing recorded yet -> not announced.
+    try std.testing.expect(!skip_already_announced(allocator, install_path, "1.2.3"));
+
+    // Recording makes it announced; other versions stay unannounced.
+    record_skip_announced(allocator, install_path, "1.2.3");
+    try std.testing.expect(skip_already_announced(allocator, install_path, "1.2.3"));
+    try std.testing.expect(!skip_already_announced(allocator, install_path, "1.2.4"));
+
+    // A second version appends without clobbering the first.
+    record_skip_announced(allocator, install_path, "1.2.4");
+    try std.testing.expect(skip_already_announced(allocator, install_path, "1.2.3"));
+    try std.testing.expect(skip_already_announced(allocator, install_path, "1.2.4"));
+
+    // A version that is merely a substring of a recorded one does not match.
+    try std.testing.expect(!skip_already_announced(allocator, install_path, "1.2"));
+
+    // A fresh install dir (new version's extract) knows nothing -> announces anew.
+    try tmp.dir.makePath("fresh_install");
+    const fresh_path = try tmp.dir.realpathAlloc(allocator, "fresh_install");
+    defer allocator.free(fresh_path);
+    try std.testing.expect(!skip_already_announced(allocator, fresh_path, "1.2.3"));
 }
