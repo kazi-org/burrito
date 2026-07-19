@@ -8,8 +8,14 @@ pub fn log_stderr(comptime message: []const u8, args: anytype) void {
     printToStderr("[l] " ++ message ++ "\n", args);
 }
 
+// Informational `[i]` lines are launcher/maintenance housekeeping (the install
+// path on first-invocation extraction, the uninstall flow) — NOT the wrapped
+// program's own output. They go to STDERR so a machine-parsed STDOUT (e.g. a
+// `<prog> version --json` invocation that triggers a first-run extraction)
+// carries only the program's output. Interactive prompts (`query`, `[?]`) stay
+// on STDOUT since they pair with a STDIN read.
 pub fn info(comptime message: []const u8, args: anytype) void {
-    printToStdout("[i] " ++ message ++ "\n", args);
+    printToStderr("[i] " ++ message ++ "\n", args);
 }
 
 pub fn warn(comptime message: []const u8, args: anytype) void {
